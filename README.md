@@ -213,6 +213,117 @@ builder = (
 python example_usage.py
 ```
 
+---
+
+# Cross-Currency Swap Bootstrap (USD Discount Curve)
+
+KRW Fixed vs USD SOFR Float CCS quotes를 사용하여 USD Discount Curve를 부트스트랩합니다.
+
+## 개요
+
+**주어진 조건:**
+- KRW Discount Curve
+- USD Forward Curve (SOFR)
+- KRW Fixed vs USD SOFR Float CCS quotes (tenor별)
+
+**부트스트랩 결과:**
+- USD Discount Curve
+
+### 핵심 원리
+
+```
+PV(KRW Fixed Leg) / Spot_FX = PV(USD Floating Leg)
+
+KRW Fixed Leg: KRW discount curve로 할인
+USD Floating Leg: USD forward curve로 projection, USD discount curve로 할인
+
+→ USD discount factors를 역산
+```
+
+## 사용법
+
+### 기본 사용법
+
+```python
+import QuantLib as ql
+from ccs_usd_discount_bootstrap import CCSUSDDiscountBootstrap, CCSQuote
+
+valuation_date = ql.Date(11, 12, 2024)
+spot_fx_rate = 1400.0  # 1 USD = 1400 KRW
+
+bootstrap = CCSUSDDiscountBootstrap(valuation_date, spot_fx_rate)
+
+# Step 1: KRW Discount Curve
+bootstrap.build_krw_discount_curve([
+    ("1Y", 0.035), ("5Y", 0.038), ("10Y", 0.040)
+])
+
+# Step 2: USD Forward Curve (SOFR)
+bootstrap.build_usd_forward_curve([
+    ("1Y", 0.045), ("5Y", 0.041), ("10Y", 0.039)
+])
+
+# Step 3: CCS Quotes (KRW Fixed Rate)
+ccs_quotes = [
+    CCSQuote("1Y", 0.032),  # 1Y: KRW fixed 3.2% vs USD SOFR float
+    CCSQuote("5Y", 0.035),
+    CCSQuote("10Y", 0.037),
+]
+
+# Step 4: Bootstrap USD Discount Curve
+usd_discount_curve = bootstrap.bootstrap_usd_discount_curve(ccs_quotes)
+```
+
+### Fluent Builder 패턴
+
+```python
+from ccs_usd_discount_bootstrap import CCSBootstrapBuilder
+
+builder = (
+    CCSBootstrapBuilder(valuation_date, spot_fx_rate)
+    .with_krw_discount_curve(krw_rates)
+    .with_usd_forward_curve(usd_fwd_rates)
+    .with_ccs_quotes(ccs_quotes)
+    .bootstrap_usd_discount()
+)
+
+curves = builder.build()
+# curves['krw_discount'] - KRW Discount Curve
+# curves['usd_forward']  - USD Forward Curve
+# curves['usd_discount'] - USD Discount Curve (bootstrapped)
+```
+
+### 기존 QuantLib 커브 사용
+
+```python
+# 이미 만들어진 curve handle 사용
+bootstrap.set_krw_discount_curve(existing_krw_curve_handle)
+bootstrap.set_usd_forward_curve(existing_usd_fwd_curve_handle)
+bootstrap.bootstrap_usd_discount_curve(ccs_quotes)
+```
+
+## 실행 결과 예시
+
+```
+RESULTS: USD Forward Curve vs USD Discount Curve
+
+[Zero Rates]
+----------------------------------------------------------------------
+Tenor       USD Forward   USD Discount    Basis (bps)
+----------------------------------------------------------------------
+1Y              4.5000%        4.8015%         30.15
+5Y              4.1000%        4.4076%         30.76
+10Y             3.9000%        4.1923%         29.23
+
+Cross-Currency Basis = USD Discount Rate - USD Forward Rate
+```
+
+## CCS 예제 실행
+
+```bash
+python example_ccs_bootstrap.py
+```
+
 ## 라이선스
 
 MIT License
