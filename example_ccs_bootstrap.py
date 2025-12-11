@@ -517,6 +517,265 @@ def example_usd_forward_curve_with_ccs_discount():
     return ccs_bootstrap, usd_bootstrap, usd_forward_curve_ccs
 
 
+def example_iterative_ccs_bootstrap():
+    """
+    Example: Iterative CCS Bootstrap for USD Curves.
+    
+    The USD forward curve and USD discount curve are interdependent:
+    - USD discount curve depends on USD forward curve (for CCS floating leg projection)
+    - USD forward curve depends on USD discount curve (for OIS bootstrapping)
+    
+    Solution: Iterate until convergence.
+    
+    Flow:
+    1. Initial: Use given USD forward curve to bootstrap USD discount curve from CCS
+    2. Iteration:
+       a. Use USD discount curve to re-bootstrap USD forward curve
+       b. Use new USD forward curve to re-bootstrap USD discount curve from CCS
+       c. Repeat until convergence
+    """
+    print("\n" + "=" * 80)
+    print("EXAMPLE 6: Iterative CCS Bootstrap (USD Forward <-> USD Discount)")
+    print("=" * 80)
+    
+    from funding_curve_bootstrap import FundingAdjustedCurveBootstrap, OISQuote
+    
+    valuation_date = ql.Date(11, 12, 2024)
+    spot_fx_rate = 1400.0
+    
+    # ========================================
+    # Setup: Input Data
+    # ========================================
+    print("\n[Setup] Input Data")
+    print("-" * 50)
+    
+    # KRW discount curve rates
+    krw_rates = [
+        ("1Y", 0.03),
+        ("5Y", 0.03),
+        ("10Y", 0.03),
+    ]
+    
+    # USD OIS quotes
+    usd_ois_quotes_data = [
+        ("1Y", 0.03),
+        ("5Y", 0.04),
+        ("10Y", 0.05),
+    ]
+    
+    # CCS quotes (KRW fixed rate)
+    ccs_quotes_data = [
+        ("1Y", 0.025),
+        ("5Y", 0.025),
+        ("10Y", 0.025),
+    ]
+    
+    print(f"  KRW Discount Rates: {krw_rates}")
+    print(f"  USD OIS Quotes: {usd_ois_quotes_data}")
+    print(f"  CCS Quotes (KRW Fixed): {ccs_quotes_data}")
+    
+    tenors = ["1Y", "2Y", "5Y", "10Y"]
+    max_iterations = 10
+    tolerance = 1e-10  # Convergence tolerance (in rate terms)
+    
+    # ========================================
+    # Initial Bootstrap
+    # ========================================
+    print("\n[Iteration 0] Initial Bootstrap")
+    print("-" * 50)
+    
+    # Build KRW discount curve (fixed throughout)
+    ccs_bootstrap = CCSUSDDiscountBootstrap(valuation_date, spot_fx_rate)
+    ccs_bootstrap.build_krw_discount_curve(krw_rates)
+    
+    # Build initial USD forward curve (standard OIS bootstrap)
+    usd_bootstrap = FundingAdjustedCurveBootstrap(
+        valuation_date=valuation_date,
+        calendar=ql.UnitedStates(ql.UnitedStates.FederalReserve),
+        day_count=ql.Actual360()
+    )
+    usd_ois_quotes = [OISQuote(t, r) for t, r in usd_ois_quotes_data]
+    usd_forward_curve = usd_bootstrap.build_ois_curve(usd_ois_quotes)
+    
+    # Set initial USD forward curve for CCS bootstrap
+    ccs_bootstrap.set_usd_forward_curve(usd_forward_curve)
+    
+    # Bootstrap initial USD discount curve from CCS
+    ccs_quotes = [CCSQuote(t, r) for t, r in ccs_quotes_data]
+    usd_discount_curve = ccs_bootstrap.bootstrap_usd_discount_curve(ccs_quotes)
+    
+    print("  - KRW Discount Curve: Built")
+    print("  - Initial USD Forward Curve (OIS): Built")
+    print("  - Initial USD Discount Curve (CCS): Bootstrapped")
+    
+    # Store iteration history
+    iteration_history = []
+    
+    # Record initial values
+    initial_fwd_rates = usd_bootstrap.get_zero_rates(usd_forward_curve, tenors)
+    initial_disc_rates = ccs_bootstrap.get_zero_rates(usd_discount_curve, tenors)
+    
+    iteration_history.append({
+        'iteration': 0,
+        'forward_rates': initial_fwd_rates.copy(),
+        'discount_rates': initial_disc_rates.copy()
+    })
+    
+    prev_fwd_rates = initial_fwd_rates
+    prev_disc_rates = initial_disc_rates
+    
+    # ========================================
+    # Iterative Bootstrap
+    # ========================================
+    print("\n[Iterative Bootstrap]")
+    print("-" * 80)
+    
+    for iteration in range(1, max_iterations + 1):
+        print(f"\n  Iteration {iteration}:")
+        
+        # Step A: Re-bootstrap USD forward curve using current USD discount curve
+        usd_forward_curve = usd_bootstrap.bootstrap_forward_curve_with_funding_discount(
+            usd_ois_quotes,
+            usd_discount_curve  # Use CCS-derived discount curve
+        )
+        
+        # Step B: Update CCS bootstrap with new USD forward curve
+        ccs_bootstrap_new = CCSUSDDiscountBootstrap(valuation_date, spot_fx_rate)
+        ccs_bootstrap_new.build_krw_discount_curve(krw_rates)
+        ccs_bootstrap_new.set_usd_forward_curve(usd_forward_curve)  # New forward curve!
+        
+        # Step C: Re-bootstrap USD discount curve from CCS with new forward curve
+        usd_discount_curve = ccs_bootstrap_new.bootstrap_usd_discount_curve(ccs_quotes)
+        
+        # Update ccs_bootstrap reference
+        ccs_bootstrap = ccs_bootstrap_new
+        
+        # Get current rates
+        curr_fwd_rates = usd_bootstrap.get_zero_rates(usd_forward_curve, tenors)
+        curr_disc_rates = ccs_bootstrap.get_zero_rates(usd_discount_curve, tenors)
+        
+        # Calculate changes
+        max_fwd_change = max(abs(curr_fwd_rates[t] - prev_fwd_rates[t]) for t in tenors)
+        max_disc_change = max(abs(curr_disc_rates[t] - prev_disc_rates[t]) for t in tenors)
+        
+        print(f"    - USD Forward Curve: re-bootstrapped (max change: {max_fwd_change*10000:.4f} bps)")
+        print(f"    - USD Discount Curve: re-bootstrapped (max change: {max_disc_change*10000:.4f} bps)")
+        
+        # Store history
+        iteration_history.append({
+            'iteration': iteration,
+            'forward_rates': curr_fwd_rates.copy(),
+            'discount_rates': curr_disc_rates.copy()
+        })
+        
+        # Check convergence
+        if max_fwd_change < tolerance and max_disc_change < tolerance:
+            print(f"\n  *** Converged at iteration {iteration}! ***")
+            break
+        
+        prev_fwd_rates = curr_fwd_rates
+        prev_disc_rates = curr_disc_rates
+    else:
+        print(f"\n  Warning: Did not converge within {max_iterations} iterations")
+    
+    # ========================================
+    # Results
+    # ========================================
+    print("\n" + "=" * 80)
+    print("CONVERGENCE RESULTS")
+    print("=" * 80)
+    
+    print("\n[Iteration History - USD Forward Curve Zero Rates]")
+    print("-" * 80)
+    header = f"{'Iter':<6}"
+    for t in tenors:
+        header += f" {t:>14}"
+    print(header)
+    print("-" * 80)
+    
+    for hist in iteration_history:
+        row = f"{hist['iteration']:<6}"
+        for t in tenors:
+            row += f" {hist['forward_rates'][t]*100:>13.6f}%"
+        print(row)
+    
+    print("\n[Iteration History - USD Discount Curve Zero Rates]")
+    print("-" * 80)
+    print(header)
+    print("-" * 80)
+    
+    for hist in iteration_history:
+        row = f"{hist['iteration']:<6}"
+        for t in tenors:
+            row += f" {hist['discount_rates'][t]*100:>13.6f}%"
+        print(row)
+    
+    print("\n[Final Curves Comparison]")
+    print("-" * 90)
+    print(f"{'Curve':<35} {'1Y':>12} {'2Y':>12} {'5Y':>12} {'10Y':>12}")
+    print("-" * 90)
+    
+    # Initial USD Forward (Iteration 0)
+    print(f"{'USD Forward (Initial, Iter 0)':<35}", end="")
+    for t in tenors:
+        print(f" {iteration_history[0]['forward_rates'][t]*100:>11.4f}%", end="")
+    print()
+    
+    # Final USD Forward
+    print(f"{'USD Forward (Final)':<35}", end="")
+    for t in tenors:
+        print(f" {iteration_history[-1]['forward_rates'][t]*100:>11.4f}%", end="")
+    print()
+    
+    # Forward Change
+    print(f"{'  Change (bps)':<35}", end="")
+    for t in tenors:
+        change = (iteration_history[-1]['forward_rates'][t] - iteration_history[0]['forward_rates'][t]) * 10000
+        print(f" {change:>11.2f}", end="")
+    print()
+    
+    print()
+    
+    # Initial USD Discount (Iteration 0)
+    print(f"{'USD Discount (Initial, Iter 0)':<35}", end="")
+    for t in tenors:
+        print(f" {iteration_history[0]['discount_rates'][t]*100:>11.4f}%", end="")
+    print()
+    
+    # Final USD Discount
+    print(f"{'USD Discount (Final)':<35}", end="")
+    for t in tenors:
+        print(f" {iteration_history[-1]['discount_rates'][t]*100:>11.4f}%", end="")
+    print()
+    
+    # Discount Change
+    print(f"{'  Change (bps)':<35}", end="")
+    for t in tenors:
+        change = (iteration_history[-1]['discount_rates'][t] - iteration_history[0]['discount_rates'][t]) * 10000
+        print(f" {change:>11.2f}", end="")
+    print()
+    
+    print("\n[Cross-Currency Basis (Final)]")
+    print("-" * 60)
+    print(f"{'Tenor':<8} {'USD Forward':>14} {'USD Discount':>14} {'Basis (bps)':>14}")
+    print("-" * 60)
+    
+    final_fwd = iteration_history[-1]['forward_rates']
+    final_disc = iteration_history[-1]['discount_rates']
+    
+    for t in tenors:
+        basis = (final_disc[t] - final_fwd[t]) * 10000
+        print(f"{t:<8} {final_fwd[t]*100:>13.4f}% {final_disc[t]*100:>13.4f}% {basis:>13.2f}")
+    
+    print("\n[Interpretation]")
+    print("  - Iterative bootstrap ensures consistency between USD forward and discount curves")
+    print("  - USD forward curve is bootstrapped using CCS-derived discount curve for discounting")
+    print("  - USD discount curve is bootstrapped from CCS using the adjusted forward curve")
+    print("  - Convergence typically occurs within a few iterations")
+    
+    return ccs_bootstrap, usd_bootstrap, usd_forward_curve, usd_discount_curve, iteration_history
+
+
 def main():
     """Run all examples."""
     print("\n" + "=" * 80)
@@ -531,6 +790,7 @@ def main():
         example_negative_basis()
         example_with_existing_curves()
         example_usd_forward_curve_with_ccs_discount()
+        example_iterative_ccs_bootstrap()
         
         print("\n" + "=" * 80)
         print("All examples completed successfully!")
